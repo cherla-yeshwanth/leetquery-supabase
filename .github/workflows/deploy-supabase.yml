@@ -1,0 +1,39 @@
+name: Deploy Supabase Backend
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "supabase/**"
+      - ".github/workflows/deploy-supabase.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-functions:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+
+      - name: Verify function path
+        run: |
+          test -f supabase/functions/make-server-19914029/index.ts
+
+      - name: Set function secrets (optional)
+        if: ${{ secrets.RESET_SECRET != '' }}
+        run: |
+          supabase secrets set RESET_SECRET="${{ secrets.RESET_SECRET }}" --project-ref "$SUPABASE_PROJECT_REF"
+
+      - name: Deploy Edge Function
+        run: |
+          supabase functions deploy make-server-19914029 --project-ref "$SUPABASE_PROJECT_REF"
