@@ -3,6 +3,7 @@ import { cors } from "npm:hono/cors";
 import { logger } from "npm:hono/logger";
 import * as kv from "./kv_store.tsx";
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { createRemoteJWKSet, jwtVerify } from "npm:jose@5";
 
 const app = new Hono();
 
@@ -40,11 +41,43 @@ async function getAuthenticatedUser(c: any) {
   }
   
   if (!accessToken) return null;
-  
+
+  // 1) Try Supabase JWT first
   const { data: { user }, error } = await supabase.auth.getUser(accessToken);
-  if (error || !user) return null;
-  
-  return user;
+  if (!error && user) return user;
+
+  // 2) Fallback: Try Clerk JWT
+  try {
+    const clerkJwksUrl = Deno.env.get("CLERK_JWKS_URL");
+    if (!clerkJwksUrl) return null;
+
+    const jwks = createRemoteJWKSet(new URL(clerkJwksUrl));
+    const clerkIssuer = Deno.env.get("CLERK_ISSUER");
+    const verifyOptions = clerkIssuer ? { issuer: clerkIssuer } : undefined;
+
+    const { payload } = await jwtVerify(accessToken, jwks, verifyOptions as any);
+
+    const userId = String(payload.sub || "");
+    if (!userId) return null;
+
+    const email =
+      (typeof payload.email === "string" && payload.email) ||
+      (typeof payload.email_address === "string" && payload.email_address) ||
+      `${userId}@clerk.local`;
+
+    const name =
+      (typeof payload.name === "string" && payload.name) ||
+      email.split("@")[0] ||
+      "User";
+
+    return {
+      id: userId,
+      email,
+      user_metadata: { name },
+    };
+  } catch {
+    return null;
+  }
 }
 
 // ==================== AUTH ROUTES ====================
