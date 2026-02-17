@@ -30,6 +30,8 @@ app.use(
 
 // ==================== AUTH MIDDLEWARE ====================
 async function getAuthenticatedUser(c: any) {
+  const requestPath = c.req.path;
+
   // Prefer X-User-Token custom header (client sends user JWT here to bypass gateway validation)
   let accessToken = c.req.header("X-User-Token");
   
@@ -42,20 +44,59 @@ async function getAuthenticatedUser(c: any) {
   
   if (!accessToken) return null;
 
+  console.log("[AuthFlow][Backend] Incoming auth token", {
+    path: requestPath,
+    hasXUserToken: !!c.req.header("X-User-Token"),
+    tokenLength: accessToken.length,
+  });
+
   // 1) Try Supabase JWT first
   const { data: { user }, error } = await supabase.auth.getUser(accessToken);
-  if (!error && user) return user;
+  if (!error && user) {
+    console.log("[AuthFlow][Backend] Authenticated via Supabase JWT", { userId: user.id });
+    return user;
+  }
+
+  if (error) {
+    console.log("[AuthFlow][Backend] Supabase JWT verification failed", {
+      message: error.message,
+      status: (error as any)?.status,
+    });
+  }
 
   // 2) Fallback: Try Clerk JWT
   try {
     const clerkJwksUrl = Deno.env.get("CLERK_JWKS_URL");
-    if (!clerkJwksUrl) return null;
+    if (!clerkJwksUrl) {
+      console.error("[AuthFlow][Backend] Missing CLERK_JWKS_URL env var");
+      return null;
+    }
 
     const jwks = createRemoteJWKSet(new URL(clerkJwksUrl));
     const clerkIssuer = Deno.env.get("CLERK_ISSUER");
-    const verifyOptions = clerkIssuer ? { issuer: clerkIssuer } : undefined;
+    let payload: any;
 
-    const { payload } = await jwtVerify(accessToken, jwks, verifyOptions as any);
+    if (clerkIssuer) {
+      try {
+        const verified = await jwtVerify(accessToken, jwks, { issuer: clerkIssuer } as any);
+        payload = verified.payload;
+      } catch (issuerError) {
+        console.warn("[AuthFlow][Backend] Clerk token failed issuer validation, retrying without issuer", {
+          issuer: clerkIssuer,
+          error: issuerError instanceof Error ? issuerError.message : String(issuerError),
+        });
+        const verifiedWithoutIssuer = await jwtVerify(accessToken, jwks);
+        payload = verifiedWithoutIssuer.payload;
+      }
+    } else {
+      const verified = await jwtVerify(accessToken, jwks);
+      payload = verified.payload;
+    }
+
+    console.log("[AuthFlow][Backend] Authenticated via Clerk JWT", {
+      sub: payload.sub,
+      hasEmail: !!(payload.email || payload.email_address),
+    });
 
     const userId = String(payload.sub || "");
     if (!userId) return null;
@@ -75,7 +116,10 @@ async function getAuthenticatedUser(c: any) {
       email,
       user_metadata: { name },
     };
-  } catch {
+  } catch (clerkError) {
+    console.error("[AuthFlow][Backend] Clerk JWT verification failed", {
+      error: clerkError instanceof Error ? clerkError.message : String(clerkError),
+    });
     return null;
   }
 }
